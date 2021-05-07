@@ -1,4 +1,5 @@
 from functools import reduce
+import os
 import gdal
 import numpy as np
 import pandas as pd
@@ -76,6 +77,18 @@ def parse_object(text):
     return out_dict
 
 
+def write_image(img, fn_out, dtype, driver='GTiff'):
+    driver = gdal.GetDriverByName(driver)
+    nbands, nrows, ncols = img.shape
+
+    out = driver.Create(fn_out, ncols, nrows, nbands, dtype)
+
+    for b in range(nbands):
+        out.GetRasterBand(b+1).WriteArray(img[b])
+
+    out.FlushCache()
+
+
 def get_increments(meta):
     raw = [l.strip() for l in meta.split('\n')]
 
@@ -96,21 +109,29 @@ def get_increments(meta):
     return row_inc, col_inc
 
 
+def filter_bands(bands):
+    filtered = []
+    for band in bands:
+        pad = ndimage.maximum_filter(band, size=20)
+        b = band.copy()
+        b[band == 0] = pad[band == 0]
+        nostripe = destripe(b, dtype=np.uint16, add_val=int(b[b > 0].mean()))
+
+        filtered.append(ndimage.gaussian_filter(nostripe, 1, mode='nearest'))
+    return np.array(filtered).astype(np.float64)
+
+
 def process_pca(filename, outfilename, epsg, pixelSpacing):
     ds = xr.open_dataset(filename)
     bands = np.array(ds[['Band13', 'Band12', 'Band10']].to_array())
 
-    filtered = []
-    for b in bands: 
-        nostripe = destripe(b, dtype=np.uint16, add_val=int(b[b>0].mean())) 
-        filtered.append(ndimage.gaussian_filter(nostripe, 1)) 
-    filtered = np.array(filtered).astype(np.float64)
-    filtered[filtered == 0] = np.nan
+    filtered = filter_bands(bands)
+    filtered[bands == 0] = np.nan
 
-    pca = pca_decomp(filtered)
-    pca[np.isnan(filtered)] = 0
+    pca = pca_decomp(filtered).astype(np.int16)
+    pca[np.isnan(filtered)] = -9999
 
-    imsave('tmp.tif', pca)
+    write_image(pca, 'tmp.tif', gdal.GDT_Int16)
 
     row_inc, col_inc = get_increments(ds.attrs['StructMetadata.0'])
 
@@ -138,6 +159,8 @@ def process_pca(filename, outfilename, epsg, pixelSpacing):
 
     out_ds = gdal.Open('tmp.tif', gdal.GA_Update)
     out_ds.SetGCPs(gcp_list, crs.ExportToWkt())
+    for b in range(1, 4):
+        out_ds.GetRasterBand(b).SetNoDataValue(-9999)
 
     out_ds = None
 
@@ -146,4 +169,52 @@ def process_pca(filename, outfilename, epsg, pixelSpacing):
 
     gdal.Warp(outfilename, 'tmp.tif', srcSRS=crs, dstSRS=dst_crs, xRes=90, yRes=90)
 
+    os.remove('tmp.tif')
 
+
+def filter_emissivity(filename, outfilename, epsg, pixelSpacing):
+    ds = xr.open_dataset(filename)
+    bands = np.array(ds[['Band14', 'Band13', 'Band12', 'Band11', 'Band10']].to_array())
+
+    filtered = filter_bands(bands)
+    filtered[bands == 0] = 0
+
+    write_image(filtered, 'tmp.tif', gdal.GDT_UInt16)
+
+    row_inc, col_inc = get_increments(ds.attrs['StructMetadata.0'])
+
+    rows = np.arange(0, bands[0].shape[0]+1, row_inc)
+    cols = np.arange(0, bands[0].shape[1]+1, col_inc)
+
+    C, R = np.meshgrid(cols, rows)
+
+    longitudes = ds['Longitude'].values
+    latitudes = ds['GeodeticLatitude'].values
+
+    gcp_df = pd.DataFrame()
+    gcp_df['pixel'] = C.flatten()
+    gcp_df['line'] = R.flatten()
+    gcp_df['x'] = longitudes.flatten()
+    gcp_df['y'] = latitudes.flatten()
+
+    gcp_list = []
+    for i, row in gcp_df.iterrows():
+        gcp = gdal.GCP(row.x, row.y, 0, row.pixel, row.line)
+        gcp_list.append(gcp)
+
+    crs = osr.SpatialReference()
+    crs.ImportFromEPSG(4326)
+
+    out_ds = gdal.Open('tmp.tif', gdal.GA_Update)
+    out_ds.SetGCPs(gcp_list, crs.ExportToWkt())
+    for b in range(1, 6):
+        out_ds.GetRasterBand(b).SetNoDataValue(0)
+
+    out_ds = None
+
+    dst_crs = osr.SpatialReference()
+    dst_crs.ImportFromEPSG(epsg)
+
+    gdal.Warp(outfilename, 'tmp.tif', srcSRS=crs, dstSRS=dst_crs, xRes=pixelSpacing, yRes=pixelSpacing)
+
+    os.remove('tmp.tif')
