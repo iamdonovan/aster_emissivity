@@ -79,14 +79,22 @@ def parse_object(text):
 
 def write_image(img, fn_out, dtype, driver='GTiff'):
     driver = gdal.GetDriverByName(driver)
-    nbands, nrows, ncols = img.shape
+    if img.ndim < 3:
+        nrows, ncols = img.shape
+        nbands = 1
+    else:
+        nbands, nrows, ncols = img.shape
 
     out = driver.Create(fn_out, ncols, nrows, nbands, dtype)
 
-    for b in range(nbands):
-        out.GetRasterBand(b+1).WriteArray(img[b])
+    if nbands == 1:
+        out.GetRasterBand(1).WriteArray(img)
+    else:
+        for b in range(nbands):
+            out.GetRasterBand(b+1).WriteArray(img[b])
 
     out.FlushCache()
+    out = None
 
 
 def get_increments(meta):
@@ -131,45 +139,9 @@ def process_pca(filename, outfilename, epsg, pixelSpacing):
     pca = pca_decomp(filtered).astype(np.int16)
     pca[np.isnan(filtered)] = -9999
 
-    write_image(pca, 'tmp.tif', gdal.GDT_Int16)
+    georeference_img(pca, ds, ndvalue=-9999)
 
-    row_inc, col_inc = get_increments(ds.attrs['StructMetadata.0'])
-
-    rows = np.arange(0, bands[0].shape[0]+1, row_inc)
-    cols = np.arange(0, bands[0].shape[1]+1, col_inc)
-
-    C, R = np.meshgrid(cols, rows)
-
-    longitudes = ds['Longitude'].values
-    latitudes = ds['GeodeticLatitude'].values
-
-    gcp_df = pd.DataFrame()
-    gcp_df['pixel'] = C.flatten()
-    gcp_df['line'] = R.flatten()
-    gcp_df['x'] = longitudes.flatten()
-    gcp_df['y'] = latitudes.flatten()
-
-    gcp_list = []
-    for i, row in gcp_df.iterrows():
-        gcp = gdal.GCP(row.x, row.y, 0, row.pixel, row.line)
-        gcp_list.append(gcp)
-
-    crs = osr.SpatialReference()
-    crs.ImportFromEPSG(4326)
-
-    out_ds = gdal.Open('tmp.tif', gdal.GA_Update)
-    out_ds.SetGCPs(gcp_list, crs.ExportToWkt())
-    for b in range(1, 4):
-        out_ds.GetRasterBand(b).SetNoDataValue(-9999)
-
-    out_ds = None
-
-    dst_crs = osr.SpatialReference()
-    dst_crs.ImportFromEPSG(epsg)
-
-    gdal.Warp(outfilename, 'tmp.tif', srcSRS=crs, dstSRS=dst_crs, xRes=90, yRes=90)
-
-    os.remove('tmp.tif')
+    warp_image(outfilename, epsg, pixelSpacing)
 
 
 def filter_emissivity(filename, outfilename, epsg, pixelSpacing):
@@ -179,12 +151,23 @@ def filter_emissivity(filename, outfilename, epsg, pixelSpacing):
     filtered = filter_bands(bands)
     filtered[bands == 0] = 0
 
-    write_image(filtered, 'tmp.tif', gdal.GDT_UInt16)
+    georeference_img(filtered, ds, gdal.GDT_Int16, ndvalue=0)
+
+    warp_image(outfilename, epsg, pixelSpacing)
+
+
+def georeference_img(img, ds, dtype, ndvalue=None):
+    write_image(img, 'tmp.tif', dtype)
 
     row_inc, col_inc = get_increments(ds.attrs['StructMetadata.0'])
-
-    rows = np.arange(0, bands[0].shape[0]+1, row_inc)
-    cols = np.arange(0, bands[0].shape[1]+1, col_inc)
+    if img.ndim < 3:
+        rows = np.arange(0, img.shape[0] + 1, row_inc)
+        cols = np.arange(0, img.shape[1] + 1, col_inc)
+        nbands = 1
+    else:
+        rows = np.arange(0, img[0].shape[0] + 1, row_inc)
+        cols = np.arange(0, img[0].shape[1] + 1, col_inc)
+        nbands = img.shape[0]
 
     C, R = np.meshgrid(cols, rows)
 
@@ -207,10 +190,18 @@ def filter_emissivity(filename, outfilename, epsg, pixelSpacing):
 
     out_ds = gdal.Open('tmp.tif', gdal.GA_Update)
     out_ds.SetGCPs(gcp_list, crs.ExportToWkt())
-    for b in range(1, 6):
-        out_ds.GetRasterBand(b).SetNoDataValue(0)
 
+    if ndvalue is not None:
+        for b in range(nbands):
+            out_ds.GetRasterBand(b+1).SetNoDataValue(ndvalue)
+
+    out_ds.FlushCache()
     out_ds = None
+
+
+def warp_image(outfilename, epsg, pixelSpacing):
+    crs = osr.SpatialReference()
+    crs.ImportFromEPSG(4326)
 
     dst_crs = osr.SpatialReference()
     dst_crs.ImportFromEPSG(epsg)
