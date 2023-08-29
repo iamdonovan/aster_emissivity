@@ -1,0 +1,11 @@
+name: emissivity
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python
+  - jupyterlab
+  - rasterio
+  - xarray
+  - scikit-image
+  - gdal
