@@ -1,10 +1,9 @@
 from functools import reduce
 import os
-import gdal
+from osgeo import gdal, osr
 import numpy as np
 import pandas as pd
 import xarray as xr
-import osr
 from skimage.filters import rank
 from skimage.io import imsave
 from scipy import ndimage
@@ -24,11 +23,11 @@ def destripe(img, dtype=np.uint8, add_val=128):
     k2 = np.ones((17, 1)) 
     k3 = np.ones((1, 15)) 
  
-    F1 = rank.mean(img, selem=k1, mask=img > 0) 
-    F2 = F1 - rank.mean(F1, selem=k2, mask=img > 0) + add_val 
+    F1 = rank.mean(img, footprint=k1, mask=img > 0)
+    F2 = F1 - rank.mean(F1, footprint=k2, mask=img > 0) + add_val
     F2[img == 0] = 0 
      
-    F3 = rank.mean(F2, selem=k3, mask=img > 0) 
+    F3 = rank.mean(F2, footprint=k3, mask=img > 0)
  
     outimg = img.astype(np.float32) - F3 + add_val 
     outimg[outimg > np.iinfo(dtype).max] = np.iinfo(dtype).max 
@@ -130,7 +129,7 @@ def filter_bands(bands):
 
 
 def process_pca(filename, outfilename, epsg, pixelSpacing):
-    ds = xr.open_dataset(filename)
+    ds = xr.open_dataset(filename, engine='netcdf4')
     bands = np.array(ds[['Band13', 'Band12', 'Band10']].to_array())
 
     filtered = filter_bands(bands)
@@ -139,13 +138,13 @@ def process_pca(filename, outfilename, epsg, pixelSpacing):
     pca = pca_decomp(filtered).astype(np.int16)
     pca[np.isnan(filtered)] = -9999
 
-    georeference_img(pca, ds, ndvalue=-9999)
+    georeference_img(pca, ds, gdal.GDT_Int16, ndvalue=-9999)
 
     warp_image(outfilename, epsg, pixelSpacing)
 
 
 def filter_emissivity(filename, outfilename, epsg, pixelSpacing):
-    ds = xr.open_dataset(filename)
+    ds = xr.open_dataset(filename, engine='netcdf4')
     bands = np.array(ds[['Band14', 'Band13', 'Band12', 'Band11', 'Band10']].to_array())
 
     filtered = filter_bands(bands)
